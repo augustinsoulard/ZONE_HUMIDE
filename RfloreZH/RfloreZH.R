@@ -6,6 +6,7 @@ setwd(WD)
 if(!require("foreign")){install.packages("foreign")} ; library("foreign")
 if(!require("reshape2")){install.packages("reshape2")} ; library("reshape2")
 if(!require("tidyverse")){install.packages("tidyverse")} ; library("tidyverse")
+if(!require("xlsx")){install.packages("xlsx")} ; library("xlsx")
 
 # Charger le fichier d'export des releves
 DATAPHYTO = read.csv(choose.files())
@@ -15,26 +16,51 @@ MELT_DATA <- melt(DATAPHYTO, id.vars = c("CD_NOM","NomComplet","RELEVE"), measur
 
 
 # Attribution d'un poid pour chaque classe phyto
-MELT_DATA$pondvalue = str_replace_all(MELT_DATA$value,c("5"="10","4"="8","3"="6","2"="4","1"="1","\\+"="0.5","r"="0.25","i"="0.125"))
-MELT_DATA$pondvalue = as.numeric(MELT_DATA$pondvalue)
+
+MELT_DATA = MELT_DATA %>% mutate(pondvalue = case_when(
+  value == "5" ~ 87.5,
+  value == "4" ~ 62.5,
+  value == "3" ~ 37.5,
+  value == "2" ~ 15,
+  value == "1" ~ 3,
+  value == "\\+" ~ 1,
+  value == "r" ~ 0.5,
+  value == "i" ~ 0.25,
+  TRUE ~ 0
+))
 colnames(MELT_DATA) = c("CD_NOM","NOM_VALIDE","RELEVE","STRATE","value","pondvalue")
 
-#Somme des scores par espèce
-AGG_DATA = aggregate(pondvalue~CD_NOM+NOM_VALIDE+RELEVE+STRATE+value,data=MELT_DATA,sum)
+MELT_DATA = MELT_DATA[,c("RELEVE","STRATE","NOM_VALIDE","pondvalue","CD_NOM")]
 
-# Joindre les informations de baseflor
-TAXREF_baseflor <- read.csv("TAXREF_baseflor.csv", sep=";")
+#Jointure de l'indication ZH
+FloreZH <- read.csv("FloreZH.csv")
+JOIN_ZH = left_join(MELT_DATA,FloreZH,by=c("CD_NOM"="CODE.FVF"))
 
-JOIN_DATA  = left_join(AGG_DATA,TAXREF_baseflor,by ="CD_NOM")
+# Construction du fichier à exporter
+JOIN_ZH_EXPORT = JOIN_ZH %>% select("CD_NOM","RELEVE","STRATE","NOM_VALIDE","pondvalue","INDIC_ZH")
+JOIN_ZH_EXPORT = JOIN_ZH_EXPORT[JOIN_ZH_EXPORT$pondvalue>0,]
+JOIN_ZH_EXPORT = arrange(JOIN_ZH_EXPORT,RELEVE,STRATE,desc(pondvalue))
+JOIN_ZH_EXPORT[is.na(JOIN_ZH_EXPORT$INDIC_ZH),]$INDIC_ZH="Non"
 
-JOIN_DATA = select(JOIN_DATA,RELEVE,STRATE,CD_NOM,NOM_VALIDE,Nom.scientifique, value,pondvalue,code_CATMINAT)
 
+# Recouvrement cumulé
+JOIN_ZH_CUMUL = JOIN_ZH_EXPORT %>% group_by(RELEVE,STRATE) %>% mutate(cumulative_sum = cumsum(pondvalue))
+SLICE_CUMUL= slice(group_by(JOIN_ZH_CUMUL,RELEVE,STRATE),1)
+JOIN_ZH_CUMUL = JOIN_ZH_CUMUL[unique(c(which(JOIN_ZH_CUMUL$cumulative_sum<=50),which(JOIN_ZH_CUMUL$cumulative_sum<=50) + 1)),]
+# Rajout des dépassants 50% sur la première valeure
 
-# ANALYSE PAR STRATE !
-source("R_script/Pluristrate.R")
+JOIN_ZH_CUMUL = rbind(JOIN_ZH_CUMUL,SLICE_CUMUL)
+JOIN_ZH_CUMUL$ID = paste0(JOIN_ZH_CUMUL$CD_NOM,JOIN_ZH_CUMUL$RELEVE,JOIN_ZH_CUMUL$STRATE)
 
-# ANALYSE TOUTES STRATES CONFONDUES
-source("R_script/Monostrate.R")
+JOIN_ZH_CUMUL = JOIN_ZH_CUMUL[!duplicated(JOIN_ZH_CUMUL$ID),]
+
+# Nettoyage
+JOIN_ZH_CUMUL = JOIN_ZH_CUMUL[!is.na(JOIN_ZH_CUMUL$cumulative_sum),]
+JOIN_ZH_CUMUL = arrange(JOIN_ZH_CUMUL,RELEVE,STRATE,desc(pondvalue))
+JOIN_ZH_CUMUL = data.frame(JOIN_ZH_CUMUL)
+
+# Export du fichier final
+write.xlsx(JOIN_ZH_CUMUL,"Bilan_esp_ZH_RELEVE.xlsx")
 
 ################################################################################
 ###################CREATION DU FICHIER RMARKDOWN################################
